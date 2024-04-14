@@ -8,8 +8,6 @@ from transformers import AutoTokenizer, CLIPTextModel
 from diffusers import AutoencoderKL, UNet2DConditionModel
 from diffusers.utils.peft_utils import set_weights_and_activate_adapters
 from peft import LoraConfig
-p = "src/"
-sys.path.append(p)
 from model import make_1step_sched, my_vae_encoder_fwd, my_vae_decoder_fwd
 
 
