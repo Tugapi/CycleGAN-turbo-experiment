@@ -119,10 +119,11 @@ def parse_args_unpaired_training():
 
     # args for dataset and dataloader options
     parser.add_argument("--dataset_folder", required=True, type=str)
-    parser.add_argument("--train_img_prep", required=True)
-    parser.add_argument("--val_img_prep", required=True)
+    parser.add_argument("--train_img_prep", default="resized_crop_512", type=str)
+    parser.add_argument("--val_img_prep", default="resized_crop_512", type=str)
     parser.add_argument("--dataloader_num_workers", type=int, default=0)
     parser.add_argument("--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader.")
+    parser.add_argument("--first_train_epoch", type=int, default=0)
     parser.add_argument("--max_train_epochs", type=int, default=100)
     parser.add_argument("--max_train_steps", type=int, default=None)
 
@@ -138,6 +139,7 @@ def parse_args_unpaired_training():
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--report_to", type=str, default="wandb")
     parser.add_argument("--tracker_project_name", type=str, required=True)
+    parser.add_argument("--track_val_fid", default=False, action="store_true")
     parser.add_argument("--validation_steps", type=int, default=500,)
     parser.add_argument("--validation_num_images", type=int, default=-1, help="Number of images to use for validation. -1 to use all images.")
     parser.add_argument("--checkpointing_steps", type=int, default=500)
@@ -168,6 +170,7 @@ def parse_args_unpaired_training():
     )
     parser.add_argument("--gradient_checkpointing", action="store_true",
         help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.")
+    parser.add_argument("--mixed_precision", type=str, default=None, choices=["no", "fp16", "bf16"],)
     parser.add_argument("--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers.")
 
     args = parser.parse_args()
@@ -180,7 +183,17 @@ def build_transform(image_prep):
             transforms.Resize(512, interpolation=transforms.InterpolationMode.LANCZOS),
             transforms.CenterCrop(512),
         ])
+    elif image_prep == "resize_crop_256":
+        T = transforms.Compose([
+            transforms.Resize(256, interpolation=transforms.InterpolationMode.LANCZOS),
+            transforms.CenterCrop(256),
+        ])
+
+    else:
+        raise RuntimeError("This pre-transform is not supported.")
     return T
+
+
 
 
 class PairedDataset(torch.utils.data.Dataset):

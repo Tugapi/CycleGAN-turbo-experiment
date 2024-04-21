@@ -50,7 +50,6 @@ def initialize_unet(rank, return_lora_module_names=False):
     unet.train()
     l_target_modules_encoder, l_target_modules_decoder, l_modules_others = [], [], []
     l_grep = ["to_k", "to_q", "to_v", "to_out.0", "conv", "conv1", "conv2", "conv_in", "conv_shortcut", "conv_out", "proj_out", "proj_in", "ff.net.2", "ff.net.0.proj"]
-    # TODO: Why set 3 LoraAdapters? easy to change rank of different parts in unet?
     for n, p in unet.named_parameters():
         if "bias" in n or "norm" in n: continue
         for pattern in l_grep:

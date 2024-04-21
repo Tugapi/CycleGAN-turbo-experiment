@@ -11,11 +11,18 @@ from accelerate.utils import set_seed
 from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
+
+import transformers
 from transformers import AutoTokenizer, CLIPTextModel
+
+import diffusers
+from diffusers.utils.import_utils import is_xformers_available
 from diffusers.optimization import get_scheduler
+
 from peft.utils import get_peft_model_state_dict
-from cleanfid.fid import get_folder_features, build_feature_extractor, frechet_distance
+from cleanfid.fid import get_folder_features, build_feature_extractor,  fid_from_feats
 import vision_aided_loss
+
 from model import make_1step_sched
 from cyclegan_turbo import CycleGAN_Turbo, VAE_encode, VAE_decode, initialize_unet, initialize_vae
 from utils.training_utils import UnpairedDataset, build_transform, parse_args_unpaired_training
@@ -23,11 +30,23 @@ from utils.dino_struct import DinoStructureLoss
 
 
 def main(args):
-    accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps, log_with=args.report_to)
+    accelerator = Accelerator(
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        mixed_precision=args.mixed_precision,
+        log_with=args.report_to)
+
+    if accelerator.is_local_main_process:
+        transformers.utils.logging.set_verbosty_warning()
+        diffusers.utils.logging.set_verbosity_info()
+    else:
+        transformers.utils.logging.set_verbosty_error()
+        diffusers.utils.logging.set_verbosity_error()
+
     set_seed(args.seed)
 
     if accelerator.is_main_process:
         os.makedirs(os.path.join(args.output_dir, "checkpoints"), exist_ok=True)
+        os.makedirs(os.path.join(args.output_dir, "eval"), exist_ok=True)
 
     tokenizer = AutoTokenizer.from_pretrained("stabilityai/sd-turbo", subfolder="tokenizer", revision=args.revision,
                                               use_fast=False, )
@@ -38,22 +57,25 @@ def main(args):
                                                                                                   return_lora_module_names=True)
     vae_a2b, vae_lora_target_modules = initialize_vae(args.lora_rank_vae, return_lora_module_names=True)
 
-    weight_dtype = torch.float32
-    vae_a2b.to(accelerator.device, dtype=weight_dtype)
-    text_encoder.to(accelerator.device, dtype=weight_dtype)
-    unet.to(accelerator.device, dtype=weight_dtype)
-    text_encoder.requires_grad_(False)
-
     if args.gan_disc_type == "vagan_clip":
         net_disc_a = vision_aided_loss.Discriminator(cv_type='clip', loss_type=args.gan_loss_type, device="cuda")
+        net_disc_a.requires_grad_(True)
         net_disc_a.cv_ensemble.requires_grad_(False)  # Freeze feature extractor
+        net_disc_a.train()
         net_disc_b = vision_aided_loss.Discriminator(cv_type='clip', loss_type=args.gan_loss_type, device="cuda")
+        net_disc_b.requires_grad_(True)
         net_disc_b.cv_ensemble.requires_grad_(False)  # Freeze feature extractor
+        net_disc_b.train()
+    else:
+        raise NotImplementedError(f"Discriminator type {args.gan_disc_type} not implemented")
 
     crit_cycle, crit_idt = torch.nn.L1Loss(), torch.nn.L1Loss()
 
     if args.enable_xformers_memory_efficient_attention:
-        unet.enable_xformers_memory_efficient_attention()
+        if is_xformers_available():
+            unet.enable_xformers_memory_efficient_attention()
+        else:
+            raise ValueError("xformers is not available, please install it by running `pip install xformers`")
 
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
@@ -63,7 +85,7 @@ def main(args):
 
     unet.conv_in.requires_grad_(True)
     vae_b2a = copy.deepcopy(vae_a2b)
-    params_gen = CycleGAN_Turbo.get_traininable_params(unet, vae_a2b, vae_b2a)
+    params_gen = CycleGAN_Turbo.get_trainable_params(unet, vae_a2b, vae_b2a)
 
     vae_enc = VAE_encode(vae_a2b, vae_b2a=vae_b2a)
     vae_dec = VAE_decode(vae_a2b, vae_b2a=vae_b2a)
@@ -91,42 +113,40 @@ def main(args):
     l_images_src_test, l_images_tgt_test = sorted(l_images_src_test), sorted(l_images_tgt_test)
 
     # make the reference FID statistics
-    if accelerator.is_main_process:
+    if accelerator.is_main_process and args.track_val_fid:
         feat_model = build_feature_extractor("clean", "cuda", use_dataparallel=False)
         """
         FID reference statistics for A -> B translation
         """
-        output_dir_ref = os.path.join(args.output_dir, "fid_reference_a2b")
-        os.makedirs(output_dir_ref, exist_ok=True)
+        output_dir_a2b_ref = os.path.join(args.output_dir, "fid_reference_a2b")
+        os.makedirs(output_dir_a2b_ref, exist_ok=True)
         # transform all images according to the validation transform and save them
         for _path in tqdm(l_images_tgt_test):
             _img = T_val(Image.open(_path).convert("RGB"))
-            outf = os.path.join(output_dir_ref, os.path.basename(_path)).replace(".jpg", ".png")
+            outf = os.path.join(output_dir_a2b_ref, os.path.basename(_path)).replace(".jpg", ".png")
             if not os.path.exists(outf):
                 _img.save(outf)
         # compute the features for the reference images
-        ref_features = get_folder_features(output_dir_ref, model=feat_model, num_workers=0, num=None,
+        a2b_ref_features = get_folder_features(output_dir_a2b_ref, model=feat_model, num_workers=0, num=None,
                                            shuffle=False, seed=0, batch_size=8, device=torch.device("cuda"),
                                            mode="clean", custom_fn_resize=None, description="", verbose=True,
                                            custom_image_tranform=None)
-        a2b_ref_mu, a2b_ref_sigma = np.mean(ref_features, axis=0), np.cov(ref_features, rowvar=False)
         """
         FID reference statistics for B -> A translation
         """
         # transform all images according to the validation transform and save them
-        output_dir_ref = os.path.join(args.output_dir, "fid_reference_b2a")
-        os.makedirs(output_dir_ref, exist_ok=True)
+        output_dir_b2a_ref = os.path.join(args.output_dir, "fid_reference_b2a")
+        os.makedirs(output_dir_b2a_ref, exist_ok=True)
         for _path in tqdm(l_images_src_test):
             _img = T_val(Image.open(_path).convert("RGB"))
-            outf = os.path.join(output_dir_ref, os.path.basename(_path)).replace(".jpg", ".png")
+            outf = os.path.join(output_dir_b2a_ref, os.path.basename(_path)).replace(".jpg", ".png")
             if not os.path.exists(outf):
                 _img.save(outf)
         # compute the features for the reference images
-        ref_features = get_folder_features(output_dir_ref, model=feat_model, num_workers=0, num=None,
+        b2a_ref_features = get_folder_features(output_dir_b2a_ref, model=feat_model, num_workers=0, num=None,
                                            shuffle=False, seed=0, batch_size=8, device=torch.device("cuda"),
                                            mode="clean", custom_fn_resize=None, description="", verbose=True,
                                            custom_image_tranform=None)
-        b2a_ref_mu, b2a_ref_sigma = np.mean(ref_features, axis=0), np.cov(ref_features, rowvar=False)
 
     lr_scheduler_gen = get_scheduler(args.lr_scheduler, optimizer=optimizer_gen,
                                      num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
@@ -137,9 +157,31 @@ def main(args):
                                       num_training_steps=args.max_train_steps * accelerator.num_processes,
                                       num_cycles=args.lr_num_cycles, power=args.lr_power)
 
-    net_lpips = lpips.LPIPS(net='vgg')
-    net_lpips.cuda()
+    net_lpips = lpips.LPIPS(net='vgg').cuda()
     net_lpips.requires_grad_(False)
+
+    # Prepare everything with our 'accelerator'.
+    unet, vae_enc, vae_dec, net_disc_a, net_disc_b = accelerator.prepare(unet, vae_enc, vae_dec, net_disc_a, net_disc_b)
+    net_lpips, optimizer_gen, optimizer_disc, train_dataloader, lr_scheduler_gen, lr_scheduler_disc = accelerator.prepare(
+        net_lpips, optimizer_gen, optimizer_disc, train_dataloader, lr_scheduler_gen, lr_scheduler_disc
+    )
+
+    weight_dtype = torch.float32
+    if accelerator.mixed_precision == "fp16":
+        weight_dtype = torch.float16
+    elif accelerator.mixed_precision == "bf16":
+        weight_dtype = torch.bfloat16
+
+    # Move all networks to device and cast to weight_dtype
+    vae_a2b.to(accelerator.device, dtype=weight_dtype)
+    text_encoder.to(accelerator.device, dtype=weight_dtype)
+    unet.to(accelerator.device, dtype=weight_dtype)
+    text_encoder.requires_grad_(False)
+
+    # We need to initialize the trackers we use, and also store our configuration.
+    # The trackers initialize automatically on the main process.
+    if accelerator.is_main_process:
+        accelerator.init_trackers(args.tracker_project_name, config=dict(vars(args)))
 
     fixed_a2b_tokens = \
     tokenizer(fixed_caption_tgt, max_length=tokenizer.model_max_length, padding="max_length", truncation=True,
@@ -151,17 +193,11 @@ def main(args):
     fixed_b2a_emb_base = text_encoder(fixed_b2a_tokens.cuda().unsqueeze(0))[0].detach()
     del text_encoder, tokenizer  # free up some memory
 
-    unet, vae_enc, vae_dec, net_disc_a, net_disc_b = accelerator.prepare(unet, vae_enc, vae_dec, net_disc_a, net_disc_b)
-    net_lpips, optimizer_gen, optimizer_disc, train_dataloader, lr_scheduler_gen, lr_scheduler_disc = accelerator.prepare(
-        net_lpips, optimizer_gen, optimizer_disc, train_dataloader, lr_scheduler_gen, lr_scheduler_disc
-    )
-    if accelerator.is_main_process:
-        accelerator.init_trackers(args.tracker_project_name, config=dict(vars(args)))
-
-    first_epoch = 0
+    first_epoch = args.first_train_epoch
     global_step = 0
-    progress_bar = tqdm(range(0, args.max_train_steps), initial=global_step, desc="Steps",
+    progress_bar = tqdm(range(first_epoch, args.max_train_steps), initial=global_step, desc="Steps",
                         disable=not accelerator.is_local_main_process, )
+
     # turn off eff. attn for the disc
     for name, module in net_disc_a.named_modules():
         if "attn" in name:
@@ -170,6 +206,7 @@ def main(args):
         if "attn" in name:
             module.fused_attn = False
 
+    # start the training loop
     for epoch in range(first_epoch, args.max_train_epochs):
         for step, batch in enumerate(train_dataloader):
             l_acc = [unet, net_disc_a, net_disc_b, vae_enc, vae_dec]
@@ -337,7 +374,7 @@ def main(args):
                         torch.cuda.empty_cache()
 
                     # compute val FID and DINO-Struct scores
-                    if global_step % args.validation_steps == 1:
+                    if global_step % args.validation_steps == 1 and args.track_val_fid:
                         _timesteps = torch.tensor([noise_scheduler_1step.config.num_train_timesteps - 1] * 1,
                                                   device="cuda").long()
                         net_dino = DinoStructureLoss()
@@ -367,14 +404,13 @@ def main(args):
                                 dino_ssim = net_dino.calculate_global_ssim_loss(a, b).item()
                                 l_dino_scores_a2b.append(dino_ssim)
                         dino_score_a2b = np.mean(l_dino_scores_a2b)
-                        gen_features = get_folder_features(fid_output_dir, model=feat_model, num_workers=0, num=None,
+                        a2b_gen_features = get_folder_features(fid_output_dir, model=feat_model, num_workers=0, num=None,
                                                            shuffle=False, seed=0, batch_size=8,
                                                            device=torch.device("cuda"),
                                                            mode="clean", custom_fn_resize=None, description="",
                                                            verbose=True,
                                                            custom_image_tranform=None)
-                        ed_mu, ed_sigma = np.mean(gen_features, axis=0), np.cov(gen_features, rowvar=False)
-                        score_fid_a2b = frechet_distance(a2b_ref_mu, a2b_ref_sigma, ed_mu, ed_sigma)
+                        score_fid_a2b = fid_from_feats(a2b_ref_features, a2b_gen_features)
                         print(f"step={global_step}, fid(a2b)={score_fid_a2b:.2f}, dino(a2b)={dino_score_a2b:.3f}")
 
                         """
@@ -403,14 +439,13 @@ def main(args):
                                 dino_ssim = net_dino.calculate_global_ssim_loss(a, b).item()
                                 l_dino_scores_b2a.append(dino_ssim)
                         dino_score_b2a = np.mean(l_dino_scores_b2a)
-                        gen_features = get_folder_features(fid_output_dir, model=feat_model, num_workers=0, num=None,
+                        b2a_gen_features = get_folder_features(fid_output_dir, model=feat_model, num_workers=0, num=None,
                                                            shuffle=False, seed=0, batch_size=8,
                                                            device=torch.device("cuda"),
                                                            mode="clean", custom_fn_resize=None, description="",
                                                            verbose=True,
                                                            custom_image_tranform=None)
-                        ed_mu, ed_sigma = np.mean(gen_features, axis=0), np.cov(gen_features, rowvar=False)
-                        score_fid_b2a = frechet_distance(b2a_ref_mu, b2a_ref_sigma, ed_mu, ed_sigma)
+                        score_fid_b2a = fid_from_feats(b2a_ref_features, b2a_gen_features)
                         print(f"step={global_step}, fid(b2a)={score_fid_b2a}, dino(b2a)={dino_score_b2a:.3f}")
                         logs["val/fid_a2b"], logs["val/fid_b2a"] = score_fid_a2b, score_fid_b2a
                         logs["val/dino_struct_a2b"], logs["val/dino_struct_b2a"] = dino_score_a2b, dino_score_b2a

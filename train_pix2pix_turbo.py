@@ -129,14 +129,14 @@ def main(args):
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-    # Move al networksr to device and cast to weight_dtype
+    # Move all networks to device and cast to weight_dtype
     net_pix2pix.to(accelerator.device, dtype=weight_dtype)
     net_disc.to(accelerator.device, dtype=weight_dtype)
     net_lpips.to(accelerator.device, dtype=weight_dtype)
     net_clip.to(accelerator.device, dtype=weight_dtype)
 
     # We need to initialize the trackers we use, and also store our configuration.
-    # The trackers initializes automatically on the main process.
+    # The trackers initialize automatically on the main process.
     if accelerator.is_main_process:
         tracker_config = dict(vars(args))
         accelerator.init_trackers(args.tracker_project_name, config=tracker_config)
