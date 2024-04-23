@@ -183,12 +183,6 @@ def build_transform(image_prep):
             transforms.Resize(512, interpolation=transforms.InterpolationMode.LANCZOS),
             transforms.CenterCrop(512),
         ])
-    elif image_prep == "resize_crop_256":
-        T = transforms.Compose([
-            transforms.Resize(256, interpolation=transforms.InterpolationMode.LANCZOS),
-            transforms.CenterCrop(256),
-        ])
-
     else:
         raise RuntimeError("This pre-transform is not supported.")
     return T
