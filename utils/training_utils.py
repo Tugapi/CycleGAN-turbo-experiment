@@ -184,7 +184,7 @@ def build_transform(image_prep):
             transforms.CenterCrop(512),
         ])
     else:
-        raise RuntimeError("This pre-transform is not supported.")
+        raise NotImplementedError(f"Pre-transform type {image_prep} not implemented")
     return T
 
 
