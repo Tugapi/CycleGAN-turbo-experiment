@@ -48,7 +48,7 @@ def initialize_unet(rank, return_lora_module_names=False):
     unet = UNet2DConditionModel.from_pretrained("stabilityai/sd-turbo", subfolder="unet")
     unet.requires_grad_(False)
     unet.train()
-    l_target_modules_encoder, l_target_modules_decoder, l_modules_others = [], [], []
+    l_target_modules_encoder, l_target_modules_decoder, l_target_modules_others = [], [], []
     l_grep = ["to_k", "to_q", "to_v", "to_out.0", "conv", "conv1", "conv2", "conv_in", "conv_shortcut", "conv_out", "proj_out", "proj_in", "ff.net.2", "ff.net.0.proj"]
     for n, p in unet.named_parameters():
         if "bias" in n or "norm" in n: continue
@@ -60,17 +60,17 @@ def initialize_unet(rank, return_lora_module_names=False):
                 l_target_modules_decoder.append(n.replace(".weight",""))
                 break
             elif pattern in n:
-                l_modules_others.append(n.replace(".weight",""))
+                l_target_modules_others.append(n.replace(".weight",""))
                 break
     lora_conf_encoder = LoraConfig(r=rank, init_lora_weights="gaussian",target_modules=l_target_modules_encoder, lora_alpha=rank)
     lora_conf_decoder = LoraConfig(r=rank, init_lora_weights="gaussian",target_modules=l_target_modules_decoder, lora_alpha=rank)
-    lora_conf_others = LoraConfig(r=rank, init_lora_weights="gaussian",target_modules=l_modules_others, lora_alpha=rank)
+    lora_conf_others = LoraConfig(r=rank, init_lora_weights="gaussian",target_modules=l_target_modules_others, lora_alpha=rank)
     unet.add_adapter(lora_conf_encoder, adapter_name="default_encoder")
     unet.add_adapter(lora_conf_decoder, adapter_name="default_decoder")
     unet.add_adapter(lora_conf_others, adapter_name="default_others")
     unet.set_adapters(["default_encoder", "default_decoder", "default_others"])
     if return_lora_module_names:
-        return unet, l_target_modules_encoder, l_target_modules_decoder, l_modules_others
+        return unet, l_target_modules_encoder, l_target_modules_decoder, l_target_modules_others
     else:
         return unet
 
@@ -161,7 +161,7 @@ class CycleGAN_Turbo(torch.nn.Module):
     def load_ckpt_from_state_dict(self, sd):
         lora_conf_encoder = LoraConfig(r=sd["rank_unet"], init_lora_weights="gaussian", target_modules=sd["l_target_modules_encoder"], lora_alpha=sd["rank_unet"])
         lora_conf_decoder = LoraConfig(r=sd["rank_unet"], init_lora_weights="gaussian", target_modules=sd["l_target_modules_decoder"], lora_alpha=sd["rank_unet"])
-        lora_conf_others = LoraConfig(r=sd["rank_unet"], init_lora_weights="gaussian", target_modules=sd["l_modules_others"], lora_alpha=sd["rank_unet"])
+        lora_conf_others = LoraConfig(r=sd["rank_unet"], init_lora_weights="gaussian", target_modules=sd["l_target_modules_others"], lora_alpha=sd["rank_unet"])
         self.unet.add_adapter(lora_conf_encoder, adapter_name="default_encoder")
         self.unet.add_adapter(lora_conf_decoder, adapter_name="default_decoder")
         self.unet.add_adapter(lora_conf_others, adapter_name="default_others")

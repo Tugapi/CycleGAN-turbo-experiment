@@ -360,7 +360,7 @@ def main(args):
                         sd = {}
                         sd["l_target_modules_encoder"] = l_modules_unet_encoder
                         sd["l_target_modules_decoder"] = l_modules_unet_decoder
-                        sd["l_modules_others"] = l_modules_unet_others
+                        sd["l_target_modules_others"] = l_modules_unet_others
                         sd["rank_unet"] = args.lora_rank_unet
                         sd["sd_encoder"] = get_peft_model_state_dict(eval_unet, adapter_name="default_encoder")
                         sd["sd_decoder"] = get_peft_model_state_dict(eval_unet, adapter_name="default_decoder")
