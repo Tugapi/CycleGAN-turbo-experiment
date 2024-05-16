@@ -11,7 +11,7 @@ def make_1step_sched():
     return noise_scheduler_1step
 
 
-def my_vae_encoder_fwd(self, sample):
+def my_vae_encoder_fwd(self, sample, inter_feat=False):
     sample = self.conv_in(sample)
     l_blocks = []
     # down
@@ -24,7 +24,10 @@ def my_vae_encoder_fwd(self, sample):
     sample = self.conv_act(sample)
     sample = self.conv_out(sample)
     self.current_down_blocks = l_blocks
-    return sample
+    if inter_feat:
+        return sample, l_blocks
+    else:
+        return sample
 
 
 def my_vae_decoder_fwd(self, sample, latent_embeds=None):

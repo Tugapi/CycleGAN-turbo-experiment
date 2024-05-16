@@ -193,9 +193,8 @@ def main(args):
     fixed_b2a_emb_base = text_encoder(fixed_b2a_tokens.cuda().unsqueeze(0))[0].detach()
     del text_encoder, tokenizer  # free up some memory
 
-    first_epoch = args.first_train_epoch
     global_step = 0
-    progress_bar = tqdm(range(first_epoch, args.max_train_steps), initial=global_step, desc="Steps",
+    progress_bar = tqdm(range(0, args.max_train_steps), initial=global_step, desc="Steps",
                         disable=not accelerator.is_local_main_process, )
 
     # turn off eff. attn for the disc
@@ -207,7 +206,7 @@ def main(args):
             module.fused_attn = False
 
     # start the training loop
-    for epoch in range(first_epoch, args.max_train_epochs):
+    for epoch in range(args.first_train_epoch, args.max_train_epochs):
         for step, batch in enumerate(train_dataloader):
             l_acc = [unet, net_disc_a, net_disc_b, vae_enc, vae_dec]
             with accelerator.accumulate(*l_acc):
