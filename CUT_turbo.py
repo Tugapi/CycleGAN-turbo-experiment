@@ -54,15 +54,15 @@ class VAE_encode(nn.Module):
         return self.vae.encode(x).latent_dist.sample() * self.vae.config.scaling_factor
 
 
-class VEA_decode(nn.Module):
+class VAE_decode(nn.Module):
     def __init__(self, vae):
-        super(VEA_decode, self).__init__()
+        super(VAE_decode, self).__init__()
         self.vae = vae
 
     def forward(self, x):
         assert self.vae.encoder.current_down_blocks is not None
         self.vae.decoder.incoming_skip_acts = self.vae.encoder.current_down_blocks
-        return self.vae.decoder(x / self.vae.config.scaling_factor).sample.clamp(-1, 1)
+        return self.vae.decoder(x / self.vae.config.scaling_factor).clamp(-1, 1)
 
 
 class Normalize(nn.Module):
@@ -117,6 +117,7 @@ class PatchSampleF(nn.Module):
                 patch_id = []
             if self.use_mlp:
                 mlp = getattr(self, 'mlp_%d' % feat_id)
+                mlp.to(feat.device)
                 x_sample = mlp(x_sample)
             return_ids.append(patch_id)
             x_sample = self.l2norm(x_sample)
@@ -127,21 +128,24 @@ class PatchSampleF(nn.Module):
 
 
 class PatchNCELoss(nn.Module):
-    def __init__(self, args):
+    def __init__(self, batch_size, num_patches, nce_T=0.07, nce_includes_all_negatives_from_minibatch=False):
         super().__init__()
-        self.args = args
+        self.batch_size = batch_size
+        self.num_patches = num_patches
+        self.nce_T = nce_T
+        self.nce_includes_all_negatives_from_minibatch = nce_includes_all_negatives_from_minibatch
         self.cross_entropy_loss = torch.nn.CrossEntropyLoss(reduction='none')
         self.mask_dtype = torch.uint8 if version.parse(torch.__version__) < version.parse('1.2.0') else torch.bool
 
     def forward(self, feat_q, feat_k):
-        num_patches = feat_q.shape[0]
+        num_patches_per_batch = feat_q.shape[0]
         dim = feat_q.shape[1]
         feat_k = feat_k.detach()
 
         # pos logit
         l_pos = torch.bmm(
-            feat_q.view(num_patches, 1, -1), feat_k.view(num_patches, -1, 1))
-        l_pos = l_pos.view(num_patches, 1)
+            feat_q.view(num_patches_per_batch, 1, -1), feat_k.view(num_patches_per_batch, -1, 1))
+        l_pos = l_pos.view(num_patches_per_batch, 1)
 
         # neg logit
 
@@ -152,11 +156,11 @@ class PatchNCELoss(nn.Module):
         # However, for single-image translation, the minibatch consists of
         # crops from the "same" high-resolution image.
         # Therefore, we will include the negatives from the entire minibatch.
-        if self.args.nce_includes_all_negatives_from_minibatch:
+        if self.nce_includes_all_negatives_from_minibatch:
             # reshape features as if they are all negatives of minibatch of size 1.
             batch_dim_for_bmm = 1
         else:
-            batch_dim_for_bmm = self.args.train_batch_size
+            batch_dim_for_bmm = self.batch_size
 
         # reshape features to batch size
         feat_q = feat_q.view(batch_dim_for_bmm, -1, dim)
@@ -170,11 +174,9 @@ class PatchNCELoss(nn.Module):
         l_neg_curbatch.masked_fill_(diagonal, -10.0)
         l_neg = l_neg_curbatch.view(-1, npatches)
 
-        out = torch.cat((l_pos, l_neg), dim=1) / self.args.nce_T
+        out = torch.cat((l_pos, l_neg), dim=1) / self.nce_T
 
-        loss = self.cross_entropy_loss(out, torch.zeros(out.size(0), dtype=torch.long,
-                                                        device=feat_q.device))
-
+        loss = self.cross_entropy_loss(out, torch.zeros(out.size(0), dtype=torch.long, device=feat_q.device))
         return loss
 
 
@@ -190,14 +192,16 @@ class CUT_turbo(torch.nn.Module):
                 = self.initialize_vae(args.lora_rank_vae, return_lora_module_names=True)
             self.unet, self.l_modules_unet_encoder, self.l_modules_unet_decoder, self.l_modules_unet_others \
                 = self.initialize_unet(args.lora_rank_unet, return_lora_module_names=True)
+            self.vae_enc = VAE_encode(self.vae)
+            self.vae_dec = VAE_decode(self.vae)
         else:
-            self.vae, self.vae_lora_target_modules, self.unet, self.l_modules_unet_encoder, self.l_modules_unet_decoder, self.l_modules_unet_others \
-                = self.load_ckpt_from_state_dict(args.pretrained_path, return_lora_module_names=True)
-        self.vae_enc = VAE_encode(self.vae)
-        self.vae_dec = VEA_decode(self.vae)
+            self.vae, self.vae_enc, self.vae_dec, self.vae_lora_target_modules \
+                = self.load_vae_from_state_dict(args.pretrained_path, return_lora_module_names=True)
+            self.unet, self.unet, self.l_modules_unet_encoder, self.l_modules_unet_decoder, self.l_modules_unet_others \
+                = self.load_unet_from_state_dict(args.pretrained_path, return_lora_module_names=True)
 
     @staticmethod
-    def initialize_vae(self, rank=4, return_lora_module_names=False):
+    def initialize_vae(rank=4, return_lora_module_names=False):
         vae = AutoencoderKL.from_pretrained("stabilityai/sd-turbo", subfolder="vae")
         vae.requires_grad_(False)
         vae.encoder.forward = my_vae_encoder_fwd.__get__(vae.encoder, vae.encoder.__class__)
@@ -232,7 +236,7 @@ class CUT_turbo(torch.nn.Module):
             return vae
 
     @staticmethod
-    def initialize_unet(self, rank = 8, return_lora_module_names=False):
+    def initialize_unet(rank = 8, return_lora_module_names=False):
         unet = UNet2DConditionModel.from_pretrained("stabilityai/sd-turbo", subfolder="unet")
         unet.requires_grad_(False)
         unet.train()
@@ -264,8 +268,8 @@ class CUT_turbo(torch.nn.Module):
         else:
             return unet
 
-    def load_ckpt_from_state_dict(self, sd, return_lora_module_names=False):
-        # load vae
+    @staticmethod
+    def load_vae_from_state_dict(sd, return_lora_module_names=False):
         vae = AutoencoderKL.from_pretrained("stabilityai/sd-turbo", subfolder="vae")
         vae.requires_grad_(False)
         vae.encoder.forward = my_vae_encoder_fwd.__get__(vae.encoder, vae.encoder.__class__)
@@ -285,39 +289,52 @@ class CUT_turbo(torch.nn.Module):
         vae.decoder.gamma = 1
         l_vae_target_modules = sd["vae_lora_target_modules"]
         vae_lora_config = LoraConfig(r=sd["rank_vae"], init_lora_weights="gaussian", target_modules=sd["vae_lora_target_modules"])
-        self.vae.add_adapter(vae_lora_config, adapter_name="vae_skip")
-        self.vae.load_state_dict(sd["sd_vae"])
-        # load unet
+        vae.add_adapter(vae_lora_config, adapter_name="vae_skip")
+        vae_enc = VAE_encode(vae)
+        vae_enc.load_state_dict(sd["sd_vae_enc"])
+        vae_dec = VAE_decode(vae)
+        vae_dec.load_state_dict(sd["sd_vae_dec"])
+
+        if return_lora_module_names:
+            return vae, vae_enc, vae_dec, l_vae_target_modules
+        else:
+            return vae, vae_enc, vae_dec
+
+    @staticmethod
+    def load_unet_from_state_dict(sd, return_lora_module_names=False):
         unet = UNet2DConditionModel.from_pretrained("stabilityai/sd-turbo", subfolder="unet")
         unet.requires_grad_(False)
         unet.train()
         l_target_modules_encoder = sd["l_target_modules_encoder"]
         l_target_modules_decoder = sd["l_target_modules_decoder"]
         l_target_modules_others = sd["l_target_modules_others"]
-        lora_conf_encoder = LoraConfig(r=sd["rank_unet"], init_lora_weights="gaussian", target_modules=sd["l_target_modules_encoder"], lora_alpha=sd["rank_unet"])
-        lora_conf_decoder = LoraConfig(r=sd["rank_unet"], init_lora_weights="gaussian", target_modules=sd["l_target_modules_decoder"], lora_alpha=sd["rank_unet"])
-        lora_conf_others = LoraConfig(r=sd["rank_unet"], init_lora_weights="gaussian", target_modules=sd["l_target_modules_others"], lora_alpha=sd["rank_unet"])
+        lora_conf_encoder = LoraConfig(r=sd["rank_unet"], init_lora_weights="gaussian",
+                                       target_modules=sd["l_target_modules_encoder"], lora_alpha=sd["rank_unet"])
+        lora_conf_decoder = LoraConfig(r=sd["rank_unet"], init_lora_weights="gaussian",
+                                       target_modules=sd["l_target_modules_decoder"], lora_alpha=sd["rank_unet"])
+        lora_conf_others = LoraConfig(r=sd["rank_unet"], init_lora_weights="gaussian",
+                                      target_modules=sd["l_target_modules_others"], lora_alpha=sd["rank_unet"])
         unet.add_adapter(lora_conf_encoder, adapter_name="default_encoder")
         unet.add_adapter(lora_conf_decoder, adapter_name="default_decoder")
         unet.add_adapter(lora_conf_others, adapter_name="default_others")
-        for n, p in self.unet.named_parameters():
+        for n, p in unet.named_parameters():
             name_sd = n.replace(".default_encoder.weight", ".weight")
             if "lora" in n and "default_encoder" in n:
                 p.data.copy_(sd["sd_encoder"][name_sd])
-        for n, p in self.unet.named_parameters():
+        for n, p in unet.named_parameters():
             name_sd = n.replace(".default_decoder.weight", ".weight")
             if "lora" in n and "default_decoder" in n:
                 p.data.copy_(sd["sd_decoder"][name_sd])
-        for n, p in self.unet.named_parameters():
+        for n, p in unet.named_parameters():
             name_sd = n.replace(".default_others.weight", ".weight")
             if "lora" in n and "default_others" in n:
                 p.data.copy_(sd["sd_others"][name_sd])
-        self.unet.set_adapter(["default_encoder", "default_decoder", "default_others"])
+        unet.set_adapter(["default_encoder", "default_decoder", "default_others"])
 
         if return_lora_module_names:
-            return vae, l_vae_target_modules, unet, l_target_modules_encoder, l_target_modules_decoder, l_target_modules_others
+            return unet, l_target_modules_encoder, l_target_modules_decoder, l_target_modules_others
         else:
-            return vae, unet
+            return unet
 
     def get_trainable_params(self):
         # add unet parameters
@@ -341,16 +358,16 @@ class CUT_turbo(torch.nn.Module):
         return params_gen
 
     def forward(self, x, caption=None, caption_emb=None):
-        assert (caption is not None and caption_emb is not None)
-        B = x[0]
-        timesteps = torch.tensor([self.noise_scheduler_1step.config.num_train_timesteps - 1] * B,
+        assert (caption is not None or caption_emb is not None)
+        B = x.shape[0]
+        timesteps = torch.tensor([self.sched.config.num_train_timesteps - 1] * B,
                                  device=x.device).long()
         x_enc = self.vae_enc(x).to(x.dtype)
         if caption_emb is None:
             caption_tokens = self.tokenizer(caption, max_length=self.tokenizer.model_max_length,
                     padding="max_length", truncation=True, return_tensors="pt").input_ids.to(x.device)
             caption_emb = self.text_encoder(caption_tokens)[0].detach().clone()
-        model_pred = self.unet(x_enc, timesteps, encoder_hidden_states=caption_emb)
+        model_pred = self.unet(x_enc, timesteps, encoder_hidden_states=caption_emb).sample
         x_out = torch.stack([self.sched.step(model_pred[i], timesteps[i], x_enc[i], return_dict=True).prev_sample for i in range(B)])
         x_out_decoded = self.vae_dec(x_out)
         return x_out_decoded
@@ -358,13 +375,23 @@ class CUT_turbo(torch.nn.Module):
 
 if __name__ == '__main__':
     feats = []
+    featsq = []
+    total_nce_loss = 0.0
+    crit_contrastive = PatchNCELoss(4, 8)
     feat1 = torch.rand([4, 3, 16, 16])
     feat2 = torch.rand([4, 6, 8, 8])
     feats.append(feat1)
     feats.append(feat2)
+    feat1q = torch.rand([4, 3, 16, 16])
+    feat2q = torch.rand([4, 6, 8, 8])
+    featsq.append(feat1q)
+    featsq.append(feat2q)
     moduleF = PatchSampleF(use_mlp=True)
-    feat_pool, sample_ids = moduleF([feat1], num_patches=8)
+    feat_pool, sample_ids = moduleF(feats, num_patches=8)
+    featq_pool, _ = moduleF(featsq, 8, sample_ids)
     for feat in feat_pool:
         print(feat.shape)
-    for sample_id in sample_ids:
-        print(sample_id.shape)
+    for feat, featq in zip(feat_pool, featq_pool):
+        total_nce_loss += crit_contrastive(feat, featq)
+    total_nce_loss /= 2
+    print(total_nce_loss)

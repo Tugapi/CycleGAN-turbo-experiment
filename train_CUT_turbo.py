@@ -48,7 +48,7 @@ def main(args):
     net_gen = CUT_turbo(args)
 
     if args.gan_disc_type == "vagan_clip":
-        net_disc = vision_aided_loss.Discriminator(cv_type='clip', loss_type=args.gan_loss_type)
+        net_disc = vision_aided_loss.Discriminator(cv_type='clip', loss_type=args.gan_loss_type, device="cuda")
         net_disc.requires_grad_(True)
         net_disc.cv_ensemble.requires_grad_(False)  # Freeze feature extractor
         net_disc.train()
@@ -58,7 +58,7 @@ def main(args):
     module_f = PatchSampleF(args.use_mlp, args.init_type, nc=args.vector_nc)
 
     crit_idt = torch.nn.L1Loss()
-    crit_contrastive = PatchNCELoss(args)
+    crit_contrastive = PatchNCELoss(args.train_batch_size, args.num_patches, args.nce_T, args.nce_includes_all_negatives_from_minibatch)
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -90,7 +90,6 @@ def main(args):
                                     tokenizer=net_gen.tokenizer)
     train_dataloader = torch.utils.data.DataLoader(dataset_train, batch_size=args.train_batch_size, shuffle=True,
                                                    num_workers=args.dataloader_num_workers)
-    fixed_caption = dataset_train.fixed_caption_tgt
 
     # images for val
     T_val = build_transform(args.val_img_prep)
@@ -134,7 +133,9 @@ def main(args):
     net_lpips.requires_grad_(False)
 
     # Prepare everything with our 'accelerator'.
-    net_gen, net_disc, module_f = accelerator.prepare(net_gen, net_disc, module_f)
+    # net_gen, net_disc, module_f = accelerator.prepare(net_gen, net_disc, module_f)
+    net_gen.unet, net_gen.vae_enc, net_gen.vae_dec = accelerator.prepare(net_gen.unet, net_gen.vae_enc, net_gen.vae_dec)
+    net_disc = accelerator.prepare(net_disc)
     net_lpips, optimizer_gen, optimizer_disc, optimizer_contrastive, train_dataloader, lr_scheduler_gen, lr_scheduler_disc = accelerator.prepare(
         net_lpips, optimizer_gen, optimizer_disc, optimizer_contrastive, train_dataloader, lr_scheduler_gen,
         lr_scheduler_disc
@@ -156,9 +157,7 @@ def main(args):
     if accelerator.is_main_process:
         accelerator.init_trackers(args.tracker_project_name, config=dict(vars(args)))
 
-    fixed_tokens = net_gen.tokenizer(fixed_caption, max_length=net_gen.tokenizer.model_max_length, padding="max_length",
-                                     truncation=True,
-                                     return_tensors="pt").input_ids[0]
+    fixed_tokens = dataset_train.input_ids_tgt[0]
     fixed_emb_base = net_gen.text_encoder(fixed_tokens.cuda().unsqueeze(0))[0].detach()
 
     global_step = 0
@@ -184,7 +183,7 @@ def main(args):
                 """
                 fake_b = net_gen(real_a, caption_emb=fixed_emb)
                 loss_G = net_disc(fake_b, for_G=True).mean() * args.lambda_gan
-                accelerator.backward(loss_G, retain_grap=False)
+                accelerator.backward(loss_G, retain_graph=True)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(params_gen, args.max_grad_norm)
                 optimizer_gen.step()
@@ -208,7 +207,7 @@ def main(args):
                 feat_q_pool, _ = module_f(feat_fake_b_list, args.num_patches)
                 total_nce_loss = 0
                 for feat_q, feat_k in zip(feat_q_pool, feat_k_pool):
-                    nce_loss = crit_contrastive(feat_q, feat_k)
+                    nce_loss = crit_contrastive(feat_q, feat_k).mean()
                     total_nce_loss += nce_loss
                 total_nce_loss = total_nce_loss / n_layers * args.lambda_contrastive
                 accelerator.backward(total_nce_loss, retain_graph=False)
@@ -258,7 +257,9 @@ def main(args):
                 global_step += 1
 
                 if accelerator.is_main_process:
-                    eval_gen = accelerator.unwrap_model(net_gen)
+                    eval_unet = accelerator.unwrap_model(net_gen.unet)
+                    eval_vae_enc = accelerator.unwrap_model(net_gen.vae_enc)
+                    eval_vae_dec = accelerator.unwrap_model(net_gen.vae_dec)
                     if global_step % args.viz_freq:
                         for tracker in accelerator.trackers:
                             if tracker.name == "wandb":
@@ -286,22 +287,21 @@ def main(args):
                         outf = os.path.join(args.output_dir, "checkpoints", f"model_{global_step}.pkl")
                         sd = {}
                         sd["rank_vae"] = args.lora_rank_vae
-                        sd["vae_lora_target_modules"] = eval_gen.vae_lora_target_modules # list
-                        sd["sd_vae"] = eval_gen.vae.state_dict()
+                        sd["vae_lora_target_modules"] = net_gen.vae_lora_target_modules # list
                         sd["rank_unet"] = args.rank_unet
-                        sd["l_target_modules_encoder"] = eval_gen.l_modules_unet_encoder
-                        sd["l_target_modules_decoder"] = eval_gen.l_modules_unet_decoder
-                        sd["l_target_modules_others"] = eval_gen.l_modules_unet_others
-                        sd["sd_encoder"] = get_peft_model_state_dict(eval_gen.unet, adapter_name="default_encoder")
-                        sd["sd_decoder"] = get_peft_model_state_dict(eval_gen.unet, adapter_name="default_decoder")
-                        sd["sd_other"] = get_peft_model_state_dict(eval_gen.unet, adapter_name="default_others")
+                        sd["l_target_modules_encoder"] = net_gen.l_modules_unet_encoder
+                        sd["l_target_modules_decoder"] = net_gen.l_modules_unet_decoder
+                        sd["l_target_modules_others"] = net_gen.l_modules_unet_others
+                        sd["sd_encoder"] = get_peft_model_state_dict(eval_unet, adapter_name="default_encoder")
+                        sd["sd_decoder"] = get_peft_model_state_dict(eval_unet, adapter_name="default_decoder")
+                        sd["sd_other"] = get_peft_model_state_dict(eval_unet, adapter_name="default_others")
                         torch.save(sd, outf)
                         gc.collect()
                         torch.cuda.empty_cache()
 
                     # compute val FID and DINO-Struct scores
                     if global_step % args.validation_steps == 1 and args.track_val_fid:
-                        _timesteps = torch.tensor([eval_gen.sched.config.num_train_timesteps - 1] * 1,
+                        timesteps = torch.tensor([net_gen.sched.config.num_train_timesteps - 1] * 1,
                                                   device="cuda").long()
                         net_dino = DinoStructureLoss()
                         """
@@ -310,7 +310,7 @@ def main(args):
                         fid_output_dir = os.path.join(args.output_dir, f"fid-{global_step}/samples")
                         os.makedirs(fid_output_dir, exist_ok=True)
                         l_dino_scores = []
-                        # cal dino score
+                       # cal dino score
                         for idx, input_img_path in enumerate(tqdm(l_images_src_test)):
                             if idx > args.validation_num_images and args.validation_num_images >= 0:
                                 break
@@ -319,7 +319,10 @@ def main(args):
                                 input_img = T_val(Image.open(input_img_path).convert("RGB"))
                                 eval_real_a = transforms.ToTensor()(input_img)
                                 eval_real_a = transforms.Normalize([0.5], [0.5])(eval_real_a)
-                                eval_fake_b = eval_gen(eval_real_a, caption_emb=fixed_emb)
+                                eval_enc = eval_vae_enc(eval_real_a).to(eval_real_a.dtype)
+                                eval_model_pred = eval_unet(eval_enc, timesteps, encoder_hidden_states=fixed_emb)
+                                eval_out = torch.stack([net_gen.sched.step(eval_model_pred[0], timesteps[0], eval_enc[0], return_dict=True).prev_sample])
+                                eval_fake_b = eval_vae_dec(eval_out)
                                 eval_fake_b_pil = transforms.ToPILImage()(eval_fake_b[0] * 0.5 + 0.5)
                                 eval_fake_b_pil.save(outf)
                                 dino_ssim = net_dino.calculate_global_ssim_loss(

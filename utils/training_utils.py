@@ -213,14 +213,14 @@ def parse_args_unpaired_contrastive_training():
     parser.add_argument("--dataset_folder", required=True, type=str)
     parser.add_argument("--train_img_prep", default="resized_crop_512", type=str)
     parser.add_argument("--val_img_prep", default="resized_crop_512", type=str)
-    parser.add_argument("--dataloader_num_workers", type=int, default=0)
+    parser.add_argument("--dataloader_num_workers", type=int, default=4)
     parser.add_argument("--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader.")
     parser.add_argument("--first_train_epoch", type=int, default=0)
     parser.add_argument("--max_train_epochs", type=int, default=100)
-    parser.add_argument("--max_train_steps", type=int, default=None)
+    parser.add_argument("--max_train_steps", type=int, default=100000)
 
     # args for the model
-    parser.add_argument("--pretrained_model_name_or_path", default="stabilityai/sd-turbo")
+    parser.add_argument("--pretrained_path", default=None, type=str)
     parser.add_argument("--revision", default=None, type=str)
     parser.add_argument("--variant", default=None, type=str)
     parser.add_argument("--lora_rank_unet", default=128, type=int)
