@@ -81,10 +81,19 @@ def main(args):
     optimizer_disc = torch.optim.AdamW(params_disc, lr=args.learning_rate, betas=(args.adam_beta1, args.adam_beta2),
                                        weight_decay=args.adam_weight_decay, eps=args.adam_epsilon, )
 
-    params_contrastive = params_gen + list(module_f.parameters())
-    optimizer_contrastive = torch.optim.AdamW(params_contrastive, lr=args.learning_rate,
-                                              betas=(args.adam_beta1, args.adam_beta2),
-                                              weight_decay=args.adam_weight_decay, eps=args.adam_epsilon, )
+    # input-dependent initialization of mlp in module_f
+    nce_layers_list = [int(i) for i in args.nce_layers.split(',')]
+    n_layers = len(nce_layers_list)
+    if args.use_mlp:
+        _, feat_list_entire = net_gen.vae.encoder(torch.rand([1, 3, 512, 512]), inter_feat=True)
+        feat_list = []
+        for i in nce_layers_list:
+            feat_list.append(feat_list_entire[i])
+        _, _ = module_f(feat_list, args.num_patches, None)
+        params_contrastive = list(module_f.parameters())
+        optimizer_contrastive = torch.optim.AdamW(params_contrastive, lr=args.learning_rate,
+                                                betas=(args.adam_beta1, args.adam_beta2),
+                                                weight_decay=args.adam_weight_decay, eps=args.adam_epsilon, )
 
     dataset_train = UnpairedDataset(dataset_folder=args.dataset_folder, image_prep=args.train_img_prep, split="train",
                                     tokenizer=net_gen.tokenizer)
@@ -125,10 +134,11 @@ def main(args):
                                       num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
                                       num_training_steps=args.max_train_steps * accelerator.num_processes,
                                       num_cycles=args.lr_num_cycles, power=args.lr_power)
-    lr_scheduler_contrastive = get_scheduler(args.lr_scheduler, optimizer=optimizer_contrastive,
-                                             num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-                                             num_training_steps=args.max_train_steps * accelerator.num_processes,
-                                             num_cycles=args.lr_num_cycles, power=args.lr_power)
+    if args.use_mlp:
+        lr_scheduler_contrastive = get_scheduler(args.lr_scheduler, optimizer=optimizer_contrastive,
+                                                num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
+                                                num_training_steps=args.max_train_steps * accelerator.num_processes,
+                                                num_cycles=args.lr_num_cycles, power=args.lr_power)
     net_lpips = lpips.LPIPS(net='vgg')
     net_lpips.requires_grad_(False)
 
@@ -136,13 +146,13 @@ def main(args):
     # net_gen, net_disc, module_f = accelerator.prepare(net_gen, net_disc, module_f)
     net_gen.unet, net_gen.vae_enc, net_gen.vae_dec = accelerator.prepare(net_gen.unet, net_gen.vae_enc, net_gen.vae_dec)
     net_disc = accelerator.prepare(net_disc)
-    net_lpips, optimizer_gen, optimizer_disc, optimizer_contrastive, train_dataloader, lr_scheduler_gen, lr_scheduler_disc = accelerator.prepare(
-        net_lpips, optimizer_gen, optimizer_disc, optimizer_contrastive, train_dataloader, lr_scheduler_gen,
+    net_lpips, optimizer_gen, optimizer_disc, train_dataloader, lr_scheduler_gen, lr_scheduler_disc = accelerator.prepare(
+        net_lpips, optimizer_gen, optimizer_disc, train_dataloader, lr_scheduler_gen,
         lr_scheduler_disc
     )
     if (args.use_mlp):
         module_f = accelerator.prepare(module_f)
-
+        optimizer_contrastive = accelerator.prepare(optimizer_contrastive)
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
@@ -155,7 +165,8 @@ def main(args):
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initialize automatically on the main process.
     if accelerator.is_main_process:
-        accelerator.init_trackers(args.tracker_project_name, config=dict(vars(args)))
+        accelerator.init_trackers(args.tracker_project_name, config=dict(vars(args)),
+                                  init_kwargs={"wandb": {"dir": args.logging_dir}})
 
     fixed_tokens = dataset_train.input_ids_tgt[0]
     fixed_emb_base = net_gen.text_encoder(fixed_tokens.cuda().unsqueeze(0))[0].detach()
@@ -183,19 +194,10 @@ def main(args):
                 """
                 fake_b = net_gen(real_a, caption_emb=fixed_emb)
                 loss_G = net_disc(fake_b, for_G=True).mean() * args.lambda_gan
-                accelerator.backward(loss_G, retain_graph=True)
-                if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(params_gen, args.max_grad_norm)
-                optimizer_gen.step()
-                # lr_scheduler_gen.step()
-                optimizer_gen.zero_grad()
                 """
                 Contrastive Objective
                 """
-                # TODO: how to get list of intermediate feature maps
-                # now only support list with one element
-                nce_layers_list = [int(i) for i in args.nce_layers.split(',')]
-                n_layers = len(nce_layers_list)
+                fake_b = net_gen(real_a, caption_emb=fixed_emb)
                 _, feat_real_a_list_entire = net_gen.vae.encoder(real_a, inter_feat=True)
                 _, feat_fake_b_list_entire = net_gen.vae.encoder(fake_b, inter_feat=True)
                 feat_real_a_list = []
@@ -208,14 +210,21 @@ def main(args):
                 total_nce_loss = 0
                 for feat_q, feat_k in zip(feat_q_pool, feat_k_pool):
                     nce_loss = crit_contrastive(feat_q, feat_k).mean()
-                    total_nce_loss += nce_loss
+                    total_nce_loss = total_nce_loss + nce_loss
                 total_nce_loss = total_nce_loss / n_layers * args.lambda_contrastive
-                accelerator.backward(total_nce_loss, retain_graph=False)
+                loss_G_total = loss_G + total_nce_loss
+                accelerator.backward(loss_G_total, retain_graph=False)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(params_contrastive, args.max_grad_norm)
-                optimizer_contrastive.step()
-                lr_scheduler_contrastive.step()
-                optimizer_contrastive.zero_grad()
+                    accelerator.clip_grad_norm_(params_gen, args.max_grad_norm)
+                optimizer_gen.step()
+                lr_scheduler_gen.step()
+                optimizer_gen.zero_grad()
+                if args.use_mlp:
+                    if accelerator.sync_gradients:
+                        accelerator.clip_grad_norm_(params_contrastive, args.max_grad_norm)
+                    optimizer_contrastive.step()
+                    lr_scheduler_contrastive.step()
+                    optimizer_contrastive.zero_grad()
                 """
                 Identity Objective
                 """
@@ -260,8 +269,9 @@ def main(args):
                     eval_unet = accelerator.unwrap_model(net_gen.unet)
                     eval_vae_enc = accelerator.unwrap_model(net_gen.vae_enc)
                     eval_vae_dec = accelerator.unwrap_model(net_gen.vae_dec)
-                    if global_step % args.viz_freq:
+                    if global_step % args.viz_freq == 1:
                         for tracker in accelerator.trackers:
+                            # Now only support wandb
                             if tracker.name == "wandb":
                                 viz_img_a = batch["pixel_values_src"]
                                 viz_img_b = batch["pixel_values_tgt"]
@@ -279,7 +289,8 @@ def main(args):
                                         wandb.Image(idt_b[idx].float().detach().cpu(), caption=f"idx={idx}")
                                         for idx in range(bsz)],
                                 }
-                                tracker.log(log_dict)
+                                log_dict.update(logs)
+                                tracker.log(log_dict, step=global_step)
                                 gc.collect()
                                 torch.cuda.empty_cache()
 
@@ -288,7 +299,9 @@ def main(args):
                         sd = {}
                         sd["rank_vae"] = args.lora_rank_vae
                         sd["vae_lora_target_modules"] = net_gen.vae_lora_target_modules # list
-                        sd["rank_unet"] = args.rank_unet
+                        sd["sd_vae_enc"] = net_gen.vae_enc.state_dict()
+                        sd["sd_vae_dec"] = net_gen.vae_dec.state_dict()
+                        sd["rank_unet"] = args.lora_rank_unet
                         sd["l_target_modules_encoder"] = net_gen.l_modules_unet_encoder
                         sd["l_target_modules_decoder"] = net_gen.l_modules_unet_decoder
                         sd["l_target_modules_others"] = net_gen.l_modules_unet_others
@@ -348,7 +361,9 @@ def main(args):
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
             if global_step >= args.max_train_steps:
+                accelerator.end_training()
                 break
+    accelerator.end_training()
 if __name__ == '__main__':
     args = parse_args_unpaired_contrastive_training()
     main(args)
