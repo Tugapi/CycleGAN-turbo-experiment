@@ -36,10 +36,10 @@ def main(args):
         log_with=args.report_to)
 
     if accelerator.is_local_main_process:
-        transformers.utils.logging.set_verbosty_warning()
+        transformers.utils.logging.set_verbosity_warning()
         diffusers.utils.logging.set_verbosity_info()
     else:
-        transformers.utils.logging.set_verbosty_error()
+        transformers.utils.logging.set_verbosity_warning()
         diffusers.utils.logging.set_verbosity_error()
 
     set_seed(args.seed)
@@ -181,7 +181,8 @@ def main(args):
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initialize automatically on the main process.
     if accelerator.is_main_process:
-        accelerator.init_trackers(args.tracker_project_name, config=dict(vars(args)))
+        accelerator.init_trackers(args.tracker_project_name, config=dict(vars(args)),
+                                  init_kwargs={"wandb": {"dir": args.logging_dir}})
 
     fixed_a2b_tokens = \
     tokenizer(fixed_caption_tgt, max_length=tokenizer.model_max_length, padding="max_length", truncation=True,
@@ -453,9 +454,11 @@ def main(args):
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
             if global_step >= args.max_train_steps:
+                accelerator.end_training()
                 break
-
+    accelerator.end_training()
 
 if __name__ == "__main__":
     args = parse_args_unpaired_training()
     main(args)
+    wandb.finish()

@@ -138,6 +138,7 @@ def parse_args_unpaired_training():
     parser.add_argument("--viz_freq", type=int, default=20)
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--report_to", type=str, default="wandb")
+    parser.add_argument("--logging_dir", type=str, default=None)
     parser.add_argument("--tracker_project_name", type=str, required=True)
     parser.add_argument("--track_val_fid", default=False, action="store_true")
     parser.add_argument("--validation_steps", type=int, default=500,)

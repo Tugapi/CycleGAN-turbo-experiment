@@ -364,6 +364,8 @@ def main(args):
                 accelerator.end_training()
                 break
     accelerator.end_training()
+
 if __name__ == '__main__':
     args = parse_args_unpaired_contrastive_training()
     main(args)
+    wandb.finish()
