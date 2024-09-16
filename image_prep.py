@@ -12,6 +12,7 @@ def canny_from_pil(image, low_threshold=100, high_threshold=200):
     control_image = Image.fromarray(image)
     return control_image
 
+
 def canny_from_tensor(images, low_threshold=100, high_threshold=200):
     edges_list = []
     for image in images:
@@ -21,3 +22,12 @@ def canny_from_tensor(images, low_threshold=100, high_threshold=200):
         edge = np.concatenate([edge, edge, edge], axis=0)
         edges_list.append(torch.from_numpy(edge))
     return torch.stack(edges_list, dim=0)
+
+
+if __name__ == '__main__':
+    img_src = Image.open("1006.png").convert("RGB")
+    edge_src = canny_from_pil(img_src, 20, 40)
+    edge_src.show()
+    img_tar = Image.open("1007.png").convert("RGB")
+    edge_tar = canny_from_pil(img_tar, 110, 150)
+    edge_tar.show()
