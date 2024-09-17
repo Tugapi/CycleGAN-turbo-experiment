@@ -20,7 +20,7 @@ def parse_args_unpaired_contrastive_inference():
     parser.add_argument('--image_path', type=str, required=True, help='path to the input image folder')
     parser.add_argument('--pretrained_path', type=str, default=None, help='path to a local model state dict to be used')
     parser.add_argument('--output_dir', type=str, default='output', help='the directory to save the output')
-    parser.add_argument('--image_prep', type=str, default='resize_512x512', help='the image preparation method')
+    parser.add_argument('--image_prep', type=str, default='resized_crop_512', help='the image preparation method')
     parser.add_argument("--use_canny", default=False, action="store_true",
                         help="whether to use canny pictures as the source images")
     parser.add_argument("--canny_low_threshold", default=100, type=int)
