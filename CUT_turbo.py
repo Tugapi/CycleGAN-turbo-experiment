@@ -195,10 +195,11 @@ class CUT_turbo(torch.nn.Module):
             self.vae_enc = VAE_encode(self.vae)
             self.vae_dec = VAE_decode(self.vae)
         else:
+            sd = torch.load(args.pretrained_path)
             self.vae, self.vae_enc, self.vae_dec, self.vae_lora_target_modules \
-                = self.load_vae_from_state_dict(args.pretrained_path, return_lora_module_names=True)
-            self.unet, self.unet, self.l_modules_unet_encoder, self.l_modules_unet_decoder, self.l_modules_unet_others \
-                = self.load_unet_from_state_dict(args.pretrained_path, return_lora_module_names=True)
+                = self.load_vae_from_state_dict(sd, return_lora_module_names=True)
+            self.unet, self.l_modules_unet_encoder, self.l_modules_unet_decoder, self.l_modules_unet_others \
+                = self.load_unet_from_state_dict(sd, return_lora_module_names=True)
 
     @staticmethod
     def initialize_vae(rank=4, return_lora_module_names=False):
