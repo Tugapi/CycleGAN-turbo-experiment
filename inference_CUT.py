@@ -3,6 +3,7 @@ import argparse
 from PIL import Image
 import torch
 from torchvision import transforms
+from tqdm import tqdm
 
 from CUT_turbo import CUT_turbo
 from utils.training_utils import build_transform
@@ -18,6 +19,7 @@ def parse_args_unpaired_contrastive_inference():
     """
     parser = argparse.ArgumentParser()
     parser.add_argument('--image_path', type=str, required=True, help='path to the input image folder')
+    parser.add_argument('--prompt', type=str, help='the prompt to be used')
     parser.add_argument('--pretrained_path', type=str, default=None, help='path to a local model state dict to be used')
     parser.add_argument('--output_dir', type=str, default='output', help='the directory to save the output')
     parser.add_argument('--image_prep', type=str, default='resized_crop_512', help='the image preparation method')
@@ -40,7 +42,7 @@ def CUT_inference(args):
 
     T_val = build_transform(args.image_prep)
 
-    for filename in os.listdir(args.image_path):
+    for filename in tqdm(os.listdir(args.image_path)):
         if filename.endswith('jpg') or filename.endswith('png'):
             file_path = os.path.join(args.image_path, filename)
             input_image = Image.open(file_path).convert('RGB')
