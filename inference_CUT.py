@@ -43,7 +43,7 @@ def CUT_inference(args):
     T_val = build_transform(args.image_prep)
 
     for filename in tqdm(os.listdir(args.image_path)):
-        if filename.endswith('jpg') or filename.endswith('png'):
+        if filename.endswith(('jpg','png','jpeg','bmp')):
             file_path = os.path.join(args.image_path, filename)
             input_image = Image.open(file_path).convert('RGB')
             if args.use_canny:
