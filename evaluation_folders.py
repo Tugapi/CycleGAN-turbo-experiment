@@ -6,8 +6,8 @@ from PIL import Image
 from cleanfid.fid import build_feature_extractor, compare_folders
 from tqdm import tqdm
 
-from utils.dino_struct import DinoStructureLoss
-from utils.training_utils import build_transform
+from tools.dino_struct import DinoStructureLoss
+from tools.training_utils import build_transform
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

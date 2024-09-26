@@ -25,8 +25,8 @@ import vision_aided_loss
 
 from model import make_1step_sched
 from cyclegan_turbo import CycleGAN_Turbo, VAE_encode, VAE_decode, initialize_unet, initialize_vae
-from utils.training_utils import UnpairedDataset, build_transform, parse_args_unpaired_training
-from utils.dino_struct import DinoStructureLoss
+from tools.training_utils import UnpairedDataset, build_transform, parse_args_unpaired_training
+from tools.dino_struct import DinoStructureLoss
 
 
 def main(args):

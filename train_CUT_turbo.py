@@ -23,9 +23,9 @@ import vision_aided_loss
 
 from CUT_turbo import CUT_turbo, PatchSampleF, PatchNCELoss
 from image_prep import canny_from_pil
-from utils.training_utils import UnpairedDataset, build_transform, build_argument, \
+from tools.training_utils import UnpairedDataset, build_transform, build_argument, \
     parse_args_unpaired_contrastive_training
-from utils.dino_struct import DinoStructureLoss
+from tools.dino_struct import DinoStructureLoss
 
 
 def main(args):

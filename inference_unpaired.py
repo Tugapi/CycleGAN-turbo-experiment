@@ -4,7 +4,7 @@ from PIL import Image
 import torch
 from torchvision import transforms
 from cyclegan_turbo import CycleGAN_Turbo
-from utils.training_utils import build_transform
+from tools.training_utils import build_transform
 
 
 if __name__ == "__main__":

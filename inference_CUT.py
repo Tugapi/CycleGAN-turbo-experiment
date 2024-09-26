@@ -6,7 +6,7 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from CUT_turbo import CUT_turbo
-from utils.training_utils import build_transform
+from tools.training_utils import build_transform
 from image_prep import canny_from_pil
 
 

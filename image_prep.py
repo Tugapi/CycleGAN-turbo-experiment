@@ -17,7 +17,8 @@ def canny_from_tensor(images, low_threshold=100, high_threshold=200):
     edges_list = []
     for image in images:
         image_numpy = image.permute(1, 2, 0).numpy()
-        edge = cv2.Canny(image_numpy.astype(np.uint8), low_threshold, high_threshold)
+        image_numpy = (image_numpy * 255).astype(np.uint8)
+        edge = cv2.Canny(image_numpy, low_threshold, high_threshold)
         edge = edge[None, :, :]
         edge = np.concatenate([edge, edge, edge], axis=0)
         edges_list.append(torch.from_numpy(edge))
