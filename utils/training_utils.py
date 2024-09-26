@@ -7,7 +7,7 @@ from torchvision import transforms
 import torchvision.transforms.functional as F
 import random
 from glob import glob
-
+from image_prep import canny_from_pil
 
 def parse_args_paired_training(input_args=None):
     parser = argparse.ArgumentParser()
@@ -219,6 +219,8 @@ def parse_args_unpaired_contrastive_training():
     parser.add_argument("--first_train_epoch", type=int, default=0)
     parser.add_argument("--max_train_epochs", type=int, default=100)
     parser.add_argument("--max_train_steps", type=int, default=100000)
+    parser.add_argument("--use_canny", default=False, action="store_true",
+                        help="whether to use canny pictures as the source images")
 
     # args for the model
     parser.add_argument("--pretrained_path", default=None, type=str)
@@ -282,6 +284,13 @@ def build_transform(image_prep):
     return T
 
 
+# TODO: add argument choose set
+def build_argument():
+    T = transforms.Compose([
+        transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.1),
+        transforms.RandomGrayscale(p=0.5)
+    ])
+    return T
 
 
 class PairedDataset(torch.utils.data.Dataset):
@@ -333,7 +342,7 @@ class PairedDataset(torch.utils.data.Dataset):
 
 
 class UnpairedDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset_folder, split, image_prep, tokenizer):
+    def __init__(self, dataset_folder, split, image_prep, tokenizer, canny=False):
         """
         A dataset class for loading unpaired data samples from two distinct domains (source and target),
         typically used in unsupervised learning tasks like image-to-image translation.
@@ -345,7 +354,7 @@ class UnpairedDataset(torch.utils.data.Dataset):
         Parameters:
         - dataset_folder (str): Base directory of the dataset containing subdirectories (train_A, train_B, test_A, test_B)
         - split (str): Indicates the dataset split to use. Expected values are 'train' or 'test'.
-        - image_prep (str): he image preprocessing transformation to apply to each image.
+        - image_prep (str): the image preprocessing transformation to apply to each image.
         - tokenizer: The tokenizer used for tokenizing the captions (or prompts).
         """
         super().__init__()
@@ -377,6 +386,7 @@ class UnpairedDataset(torch.utils.data.Dataset):
         for ext in ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.gif"]:
             self.l_imgs_tgt.extend(glob(os.path.join(self.target_folder, ext)))
         self.T = build_transform(image_prep)
+        self.canny = canny
 
     def __len__(self):
         """
@@ -411,6 +421,9 @@ class UnpairedDataset(torch.utils.data.Dataset):
             - "caption_tgt": The fixed caption of the target domain.
             - "input_ids_src": The source domain's fixed caption tokenized.
             - "input_ids_tgt": The target domain's fixed caption tokenized.
+            (if canny)
+            - "pixel_values_src_canny": The processed source canny result
+            - "pixel_values_tgt_canny": The processed target canny result
         """
         if index < len(self.l_imgs_src):
             img_path_src = self.l_imgs_src[index]
@@ -424,11 +437,25 @@ class UnpairedDataset(torch.utils.data.Dataset):
         # both source and target domain's images scaled to -1,1
         img_t_src = F.normalize(img_t_src, mean=[0.5], std=[0.5])
         img_t_tgt = F.normalize(img_t_tgt, mean=[0.5], std=[0.5])
-        return {
-            "pixel_values_src": img_t_src,
-            "pixel_values_tgt": img_t_tgt,
-            "caption_src": self.fixed_caption_src,
-            "caption_tgt": self.fixed_caption_tgt,
-            "input_ids_src": self.input_ids_src,
-            "input_ids_tgt": self.input_ids_tgt,
-        }
+        dict = {
+                "pixel_values_src": img_t_src,
+                "pixel_values_tgt": img_t_tgt,
+                "caption_src": self.fixed_caption_src,
+                "caption_tgt": self.fixed_caption_tgt,
+                "input_ids_src": self.input_ids_src,
+                "input_ids_tgt": self.input_ids_tgt,
+            }
+        if not self.canny:
+            return dict
+        else:
+            # TODO：try out a best threshold
+            img_pil_src_canny = canny_from_pil(img_pil_src, 20, 40)
+            img_pil_tgt_canny = canny_from_pil(img_pil_tgt,110, 150)
+            img_t_src_canny = F.to_tensor(self.T(img_pil_src_canny))
+            img_t_tgt_canny = F.to_tensor(self.T(img_pil_tgt_canny))
+            # both source and target domain's images scaled to -1,1
+            img_t_src_canny = F.normalize(img_t_src_canny, mean=[0.5], std=[0.5])
+            img_t_tgt_canny = F.normalize(img_t_tgt_canny, mean=[0.5], std=[0.5])
+            dict["pixel_values_src_canny"] = img_t_src_canny
+            dict["pixel_values_tgt_canny"] = img_t_tgt_canny
+            return dict

@@ -25,9 +25,9 @@ def canny_from_tensor(images, low_threshold=100, high_threshold=200):
 
 
 if __name__ == '__main__':
-    img_src = Image.open("1006.png").convert("RGB")
-    edge_src = canny_from_pil(img_src, 20, 40)
+    img_src = Image.open("_a000001.jpg").convert("RGB")
+    edge_src = canny_from_pil(img_src, 20, 50)
     edge_src.show()
-    img_tar = Image.open("1007.png").convert("RGB")
-    edge_tar = canny_from_pil(img_tar, 110, 150)
+    img_tar = Image.open("_b000001.jpg").convert("RGB")
+    edge_tar = canny_from_pil(img_tar, 120, 180)
     edge_tar.show()

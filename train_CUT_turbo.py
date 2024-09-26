@@ -22,7 +22,9 @@ from cleanfid.fid import get_folder_features, build_feature_extractor, fid_from_
 import vision_aided_loss
 
 from CUT_turbo import CUT_turbo, PatchSampleF, PatchNCELoss
-from utils.training_utils import UnpairedDataset, build_transform, parse_args_unpaired_contrastive_training
+from image_prep import canny_from_pil
+from utils.training_utils import UnpairedDataset, build_transform, build_argument, \
+    parse_args_unpaired_contrastive_training
 from utils.dino_struct import DinoStructureLoss
 
 
@@ -96,9 +98,12 @@ def main(args):
                                                 weight_decay=args.adam_weight_decay, eps=args.adam_epsilon, )
 
     dataset_train = UnpairedDataset(dataset_folder=args.dataset_folder, image_prep=args.train_img_prep, split="train",
-                                    tokenizer=net_gen.tokenizer)
+                                    tokenizer=net_gen.tokenizer, canny=args.use_canny)
     train_dataloader = torch.utils.data.DataLoader(dataset_train, batch_size=args.train_batch_size, shuffle=True,
                                                    num_workers=args.dataloader_num_workers)
+
+    # arguments for contrastive loss
+    arguments_con = build_argument()
 
     # images for val
     T_val = build_transform(args.val_img_prep)
@@ -187,18 +192,31 @@ def main(args):
             with accelerator.accumulate(*l_acc):
                 real_a = batch["pixel_values_src"].to(dtype=weight_dtype)
                 real_b = batch["pixel_values_tgt"].to(dtype=weight_dtype)
+                if args.use_canny:
+                    real_a_canny = batch["pixel_values_src_canny"].to(dtype=weight_dtype)
+                    real_b_canny = batch["pixel_values_tgt_canny"].to(dtype=weight_dtype)
                 bsz = real_a.shape[0]
                 fixed_emb = fixed_emb_base.repeat(bsz, 1, 1).to(dtype=weight_dtype)
                 """
                 GAN Objective
                 """
-                fake_b = net_gen(real_a, caption_emb=fixed_emb)
+                if args.use_canny:
+                    fake_b = net_gen(real_a_canny, caption_emb=fixed_emb)
+                else:
+                    fake_b = net_gen(real_a, caption_emb=fixed_emb)
                 loss_G = net_disc(fake_b, for_G=True).mean() * args.lambda_gan
                 """
                 Contrastive Objective
                 """
-                fake_b = net_gen(real_a, caption_emb=fixed_emb)
-                _, feat_real_a_list_entire = net_gen.vae.encoder(real_a, inter_feat=True)
+                if args.use_canny:
+                    fake_b = net_gen(real_a_canny, caption_emb=fixed_emb)
+                else:
+                    fake_b = net_gen(real_a, caption_emb=fixed_emb)
+                # TODO: whether version of the query, + samples and - samples?
+                if args.use_canny:
+                    _, feat_real_a_list_entire = net_gen.vae.encoder(real_a_canny, inter_feat=True)
+                else:
+                    _, feat_real_a_list_entire = net_gen.vae.encoder(real_a, inter_feat=True)
                 _, feat_fake_b_list_entire = net_gen.vae.encoder(fake_b, inter_feat=True)
                 feat_real_a_list = []
                 feat_fake_b_list = []
@@ -230,6 +248,11 @@ def main(args):
                 """
                 idt_b = net_gen(real_b, caption_emb=fixed_emb)
                 loss_idt = crit_idt(idt_b, real_b) * args.lambda_idt + net_lpips(idt_b, real_b).mean() * args.lambda_idt_lpips
+                if args.use_canny:
+                    # TODO: whether real_b_canny -> ind_b_canny is needed?
+                    idt_b_canny = net_gen(real_b_canny, caption_emb=fixed_emb)
+                    loss_idt += crit_idt(idt_b_canny, real_b) * args.lambda_idt + net_lpips(idt_b_canny, real_b).mean() * args.lambda_idt_lpips
+                    loss_idt *= 0.5
                 accelerator.backward(loss_idt, retain_graph=False)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(params_gen, args.max_grad_norm)
@@ -289,6 +312,18 @@ def main(args):
                                         wandb.Image(idt_b[idx].float().detach().cpu(), caption=f"idx={idx}")
                                         for idx in range(bsz)],
                                 }
+                                if args.use_canny:
+                                    viz_img_a_canny = batch["pixel_values_src_canny"]
+                                    viz_img_b_canny = batch["pixel_values_tgt_canny"]
+                                    log_dict["train/real_a_canny"] = [
+                                        wandb.Image(viz_img_a_canny[idx].float().detach().cpu(), caption=f"idx={idx}")
+                                        for idx in range(bsz)]
+                                    log_dict["train/real_b_canny"] = [
+                                        wandb.Image(viz_img_b_canny[idx].float().detach().cpu(), caption=f"idx={idx}")
+                                        for idx in range(bsz)]
+                                    log_dict["train/idt_b_canny"] = [
+                                        wandb.Image(idt_b_canny[idx].float().detach().cpu(), caption=f"idx={idx}")
+                                        for idx in range(bsz)]
                                 log_dict.update(logs)
                                 tracker.log(log_dict, step=global_step)
                                 gc.collect()
@@ -298,7 +333,7 @@ def main(args):
                         outf = os.path.join(args.output_dir, "checkpoints", f"model_{global_step}.pkl")
                         sd = {}
                         sd["rank_vae"] = args.lora_rank_vae
-                        sd["vae_lora_target_modules"] = net_gen.vae_lora_target_modules # list
+                        sd["vae_lora_target_modules"] = net_gen.vae_lora_target_modules  # list
                         sd["sd_vae_enc"] = net_gen.vae_enc.state_dict()
                         sd["sd_vae_dec"] = net_gen.vae_dec.state_dict()
                         sd["rank_unet"] = args.lora_rank_unet
@@ -307,7 +342,7 @@ def main(args):
                         sd["l_target_modules_others"] = net_gen.l_modules_unet_others
                         sd["sd_encoder"] = get_peft_model_state_dict(eval_unet, adapter_name="default_encoder")
                         sd["sd_decoder"] = get_peft_model_state_dict(eval_unet, adapter_name="default_decoder")
-                        sd["sd_other"] = get_peft_model_state_dict(eval_unet, adapter_name="default_others")
+                        sd["sd_others"] = get_peft_model_state_dict(eval_unet, adapter_name="default_others")
                         torch.save(sd, outf)
                         gc.collect()
                         torch.cuda.empty_cache()
@@ -315,7 +350,7 @@ def main(args):
                     # compute val FID and DINO-Struct scores
                     if global_step % args.validation_steps == 1 and args.track_val_fid:
                         timesteps = torch.tensor([net_gen.sched.config.num_train_timesteps - 1] * 1,
-                                                  device="cuda").long()
+                                                 device="cuda").long()
                         net_dino = DinoStructureLoss()
                         """
                         Evaluate
@@ -323,14 +358,17 @@ def main(args):
                         fid_output_dir = os.path.join(args.output_dir, f"fid-{global_step}/samples")
                         os.makedirs(fid_output_dir, exist_ok=True)
                         l_dino_scores = []
-                       # cal dino score
+                        # cal dino score
                         for idx, input_img_path in enumerate(tqdm(l_images_src_test)):
                             if idx > args.validation_num_images and args.validation_num_images >= 0:
                                 break
                             outf = os.path.join(fid_output_dir, f"{idx}.png")
                             with torch.no_grad():
                                 input_img = T_val(Image.open(input_img_path).convert("RGB"))
-                                eval_real_a = transforms.ToTensor()(input_img)
+                                if args.use_canny:
+                                    eval_real_a = transforms.ToTensor()(canny_from_pil(input_img, 20, 40))
+                                else:
+                                    eval_real_a = transforms.ToTensor()(input_img)
                                 eval_real_a = transforms.Normalize([0.5], [0.5])(eval_real_a)
                                 eval_enc = eval_vae_enc(eval_real_a).to(eval_real_a.dtype)
                                 eval_model_pred = eval_unet(eval_enc, timesteps, encoder_hidden_states=fixed_emb)
@@ -364,6 +402,7 @@ def main(args):
                 accelerator.end_training()
                 break
     accelerator.end_training()
+
 
 if __name__ == '__main__':
     args = parse_args_unpaired_contrastive_training()
